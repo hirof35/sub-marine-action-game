@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>潜水艦アクションゲーム - Difficulty Select</title>
+    <style>
+        body {
+            margin: 0;
+            background-color: #111;
+            color: white;
+            font-family: sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            overflow: hidden;
+        }
+        canvas {
+            border: 4px solid #005577;
+            background: linear-gradient(to bottom, #001133, #000511);
+            box-shadow: 0 0 20px rgba(0, 255, 255, 0.2);
+        }
+        .controls {
+            margin-top: 10px;
+            color: #ccc;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>SUBMARINE COMMANDER</h1>
+    <canvas id="gameCanvas" width="800" height="500"></canvas>
+    <div class="controls">操作: 矢印キー（移動） | スペースキー（選択 / 魚雷発射）</div>
+
+<script>
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+
+// --- ゲームの画面状態（シーン）管理 ---
+const SCENE_TITLE = 0;
+const SCENE_PLAYING = 1;
+const SCENE_GAMEOVER = 2;
+const SCENE_CLEAR = 3;
+let currentScene = SCENE_TITLE;
+
+// --- 難易度設定のパラメータ ---
+const DIFFICULTY_SETTINGS = {
+    EASY:   { maxEnemies: 1, enemySpeedMin: 0.8, enemySpeedMax: 1.2, chargeCooldown: 120, targetCount: 3, label: "EASY" },
+    NORMAL: { maxEnemies: 2, enemySpeedMin: 1.2, enemySpeedMax: 2.2, chargeCooldown: 80,  targetCount: 5, label: "NORMAL" },
+    HARD:   { maxEnemies: 3, enemySpeedMin: 2.0, enemySpeedMax: 3.5, chargeCooldown: 45,  targetCount: 7, label: "HARD" }
+};
+let selectedDiffIndex = 1; // 0: EASY, 1: NORMAL, 2: HARD
+let currentDiff = DIFFICULTY_SETTINGS.NORMAL;
+
+// 潜水艦（プレイヤー）
+const player = {
+    x: 100,
+    y: 250,
+    vx: 0,
+    vy: 0,
+    speed: 0.2,
+    friction: 0.98,
+    width: 60,
+    height: 25,
+    cooldown: 0
+};
+
+// ゲームの状態管理変数
+const keys = {};
+let torpedoes = [];    
+let enemies = [];      
+let depthCharges = []; 
+let score = 0;      
+let enemySpawnTimer = 0; 
+let defeatedEnemies = 0; 
+
+// キー入力の監視
+window.addEventListener('keydown', e => {
+    // タイトル画面での難易度選択処理（一度だけ判定させたいのでキーダウンイベント内で処理）
+    if (currentScene === SCENE_TITLE) {
+        if (e.code === 'ArrowUp' || e.code === 'ArrowLeft') {
+            selectedDiffIndex = (selectedDiffIndex + 2) % 3; // 前の難易度へ
+        }
+        if (e.code === 'ArrowDown' || e.code === 'ArrowRight') {
+            selectedDiffIndex = (selectedDiffIndex + 1) % 3; // 次の難易度へ
+        }
+        if (e.code === 'Space') {
+            // 選択された難易度を適用してゲーム開始
+            const diffKeys = ['EASY', 'NORMAL', 'HARD'];
+            currentDiff = DIFFICULTY_SETTINGS[diffKeys[selectedDiffIndex]];
+            resetGame();
+            currentScene = SCENE_PLAYING;
+        }
+        return;
+    }
+
+    // ゲームオーバー・クリア画面からの復帰
+    if (currentScene === SCENE_GAMEOVER || currentScene === SCENE_CLEAR) {
+        if (e.code === 'Enter') {
+            currentScene = SCENE_TITLE; // タイトルに戻る
+        }
+    }
+
+    keys[e.code] = true;
+});
+
+window.addEventListener('keyup', e => keys[e.code] = false);
+
+// 全体のゲームループ
+function gameLoop() {
+    if (currentScene === SCENE_PLAYING) {
+        updateGame();
+    }
+    draw();
+    requestAnimationFrame(gameLoop);
+}
+
+// データ更新処理（ゲーム本編）
+function updateGame() {
+    // --- 1. プレイヤーの移動処理 ---
+    if (keys['ArrowUp'])    player.vy -= player.speed;
+    if (keys['ArrowDown'])  player.vy += player.speed;
+    if (keys['ArrowLeft'])  player.vx -= player.speed;
+    if (keys['ArrowRight']) player.vx += player.speed;
+
+    player.vx *= player.friction;
+    player.vy *= player.friction;
+    player.x += player.vx;
+    player.y += player.vy;
+
+    if (player.x < 0) player.x = 0;
+    if (player.x > canvas.width - player.width) player.x = canvas.width - player.width;
+    if (player.y < 100) player.y = 100; 
+    if (player.y > canvas.height - player.height) player.y = canvas.height - player.height;
+
+    // --- 2. 誘導魚雷の発射＆移動処理 ---
+    if (keys['Space'] && player.cooldown === 0) {
+        torpedoes.push({
+            x: player.x + player.width,
+            y: player.y + player.height / 2,
+            vx: 4, vy: 0, speed: 5, width: 15, height: 4
+        });
+        player.cooldown = 25; 
+    }
+    if (player.cooldown > 0) player.cooldown--;
+
+    for (let i = torpedoes.length - 1; i >= 0; i--) {
+        const t = torpedoes[i];
+        let closestEnemy = null;
+        let minDist = Infinity;
+        enemies.forEach(e => {
+            let dist = Math.hypot((e.x + e.width/2) - t.x, (e.y + e.height/2) - t.y);
+            if (dist < minDist) { minDist = dist; closestEnemy = e; }
+        });
+
+        if (closestEnemy) {
+            let targetX = closestEnemy.x + closestEnemy.width / 2;
+            let targetY = closestEnemy.y + closestEnemy.height / 2;
+            let angle = Math.atan2(targetY - t.y, targetX - t.x);
+            t.vx += Math.cos(angle) * 0.2;
+            t.vy += Math.sin(angle) * 0.2;
+            let currentSpeed = Math.hypot(t.vx, t.vy);
+            t.vx = (t.vx / currentSpeed) * t.speed;
+            t.vy = (t.vy / currentSpeed) * t.speed;
+        } else {
+            t.vx = t.speed; t.vy = 0;
+        }
+        t.x += t.vx; t.y += t.vy;
+
+        if (t.x > canvas.width || t.x < 0 || t.y > canvas.height || t.y < 0) {
+            torpedoes.splice(i, 1);
+        }
+    }
+
+    // --- 3. 敵艦（駆逐艦）の出現（難易度ごとの最大数を使用） ---
+    if (enemies.length < currentDiff.maxEnemies) {
+        enemySpawnTimer++;
+        if (enemySpawnTimer > 150) { 
+            enemies.push({
+                x: canvas.width,
+                y: 25, 
+                // 難易度ごとの速度範囲
+                speed: currentDiff.enemySpeedMin + Math.random() * (currentDiff.enemySpeedMax - currentDiff.enemySpeedMin), 
+                width: 90,
+                height: 25,
+                cooldown: 0 
+            });
+            enemySpawnTimer = 0;
+        }
+    }
+
+    // --- 4. 敵艦の移動＆爆雷投下 ---
+    for (let i = enemies.length - 1; i >= 0; i--) {
+        const e = enemies[i];
+        e.x -= e.speed; 
+        if (e.cooldown > 0) e.cooldown--;
+
+        const playerCenterX = player.x + player.width / 2;
+        // 潜水艦が真下、かつ爆雷クールダウン終了時
+        if (playerCenterX > e.x && playerCenterX < e.x + e.width && e.cooldown === 0) {
+            depthCharges.push({
+                x: e.x + e.width / 2,
+                y: e.y + e.height,
+                vy: 2.5, // 爆雷自体の速度も少しUP
+                radius: 6
+            });
+            e.cooldown = currentDiff.chargeCooldown; // 難易度ごとに連射速度が変わる
+        }
+        if (e.x + e.width < 0) { enemies.splice(i, 1); }
+    }
+
+    // --- 5. 爆雷（機雷）の移動＆プレイヤー衝突判定 ---
+    for (let i = depthCharges.length - 1; i >= 0; i--) {
+        const d = depthCharges[i];
+        d.y += d.vy; 
+
+        if (d.x > player.x && d.x < player.x + player.width &&
+            d.y > player.y && d.y < player.y + player.height) {
+            currentScene = SCENE_GAMEOVER; // ゲームオーバーシーンへ
+        }
+        if (d.y > canvas.height) { depthCharges.splice(i, 1); }
+    }
+
+    // --- 6. 魚雷と敵艦の当たり判定 ---
+    for (let tIdx = torpedoes.length - 1; tIdx >= 0; tIdx--) {
+        for (let eIdx = enemies.length - 1; eIdx >= 0; eIdx--) {
+            const t = torpedoes[tIdx];
+            const e = enemies[eIdx];
+
+            if (t && e &&
+                t.x < e.x + e.width && t.x + t.width > e.x &&
+                t.y < e.y + e.height && t.y + t.height > e.y) {
+                
+                torpedoes.splice(tIdx, 1);
+                enemies.splice(eIdx, 1);
+                score += 100;
+                defeatedEnemies++;
+                
+                // 難易度ごとのクリア目標に達したか判定
+                if (defeatedEnemies >= currentDiff.targetCount) {
+                    currentScene = SCENE_CLEAR; // クリアシーンへ
+                }
+                break; 
+            }
+        }
+    }
+}
+
+// 描画総合処理
+function draw() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // --- タイトル画面の描画 ---
+    if (currentScene === SCENE_TITLE) {
+        ctx.fillStyle = 'rgba(0, 20, 40, 1)';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        ctx.fillStyle = '#00ffcc';
+        ctx.font = 'bold 40px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('SUBMARINE COMMANDER', canvas.width / 2, 140);
+
+        ctx.fillStyle = '#ffffff';
+        ctx.font = '20px sans-serif';
+        ctx.fillText('難易度を選択して [ SPACE ] を押してください', canvas.width / 2, 220);
+
+        // 難易度の選択肢を描画
+        const diffLabels = ['EASY (目標:3隻)', 'NORMAL (目標:5隻)', 'HARD (目標:7隻)'];
+        const diffColors = ['#00ff00', '#ffff00', '#ff3333'];
+        
+        for (let i = 0; i < 3; i++) {
+            if (i === selectedDiffIndex) {
+                ctx.fillStyle = diffColors[i];
+                ctx.font = 'bold 26px sans-serif';
+                ctx.fillText(`▶ ${diffLabels[i]} ◀`, canvas.width / 2, 300 + i * 45);
+            } else {
+                ctx.fillStyle = '#666666';
+                ctx.font = '22px sans-serif';
+                ctx.fillText(diffLabels[i], canvas.width / 2, 300 + i * 45);
+            }
+        }
+        ctx.textAlign = 'left';
+        return;
+    }
+
+    // --- ゲーム本編・ゲームオーバー・クリア時の背景とオブジェクトの描画 ---
+    // 海面
+    ctx.fillStyle = 'rgba(0, 150, 255, 0.2)';
+    ctx.fillRect(0, 0, canvas.width, 50);
+
+    // 敵艦（駆逐艦）
+    enemies.forEach(e => {
+        ctx.fillStyle = '#778899'; ctx.fillRect(e.x, e.y, e.width, e.height);
+        ctx.fillStyle = '#556677'; ctx.fillRect(e.x + e.width * 0.4, e.y - 12, 20, 12);
+    });
+
+    // 爆雷（機雷）
+    ctx.fillStyle = '#ffcc00';
+    depthCharges.forEach(d => {
+        ctx.beginPath(); ctx.arc(d.x, d.y, d.radius, 0, Math.PI * 2); ctx.fill();
+    });
+
+    // プレイヤー（潜水艦）
+    if (currentScene !== SCENE_GAMEOVER) {
+        ctx.fillStyle = '#00aa99';
+        ctx.fillRect(player.x, player.y, player.width, player.height);
+        ctx.fillRect(player.x + player.width * 0.4, player.y - 10, 15, 10); 
+    }
+
+    // 誘導魚雷
+    ctx.fillStyle = '#ff3333';
+    torpedoes.forEach(t => { ctx.fillRect(t.x, t.y - 2, t.width, t.height); });
+
+    // UI表示
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '18px sans-serif';
+    ctx.fillText(`SCORE: ${score}`, 20, 35);
+    ctx.fillText(`MODE: ${currentDiff.label}`, 200, 35);
+    ctx.fillText(`TARGET: ${defeatedEnemies} / ${currentDiff.targetCount}`, 620, 35);
+
+    // --- ゲームオーバー画面の重ね合わせ描画 ---
+    if (currentScene === SCENE_GAMEOVER) {
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = '#ff3333';
+        ctx.font = 'bold 40px sans-serif'; ctx.textAlign = 'center';
+        ctx.fillText('撃沈されました (GAME OVER)', canvas.width / 2, canvas.height / 2 - 20);
+        ctx.fillStyle = '#ffffff'; ctx.font = '20px sans-serif';
+        ctx.fillText('Press [ Enter ] to Title', canvas.width / 2, canvas.height / 2 + 30);
+        ctx.textAlign = 'left'; 
+    }
+
+    // --- ゲームクリア画面の重ね合わせ描画 ---
+    if (currentScene === SCENE_CLEAR) {
+        ctx.fillStyle = 'rgba(0, 30, 60, 0.8)';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = '#00ffcc';
+        ctx.font = 'bold 45px sans-serif'; ctx.textAlign = 'center';
+        ctx.fillText(`作戦成功！ [${currentDiff.label} CLEAR]`, canvas.width / 2, canvas.height / 2 - 20);
+        ctx.fillStyle = '#ffffff'; ctx.font = '20px sans-serif';
+        ctx.fillText(`Score: ${score} | Press [ Enter ] to Title`, canvas.width / 2, canvas.height / 2 + 30);
+        ctx.textAlign = 'left'; 
+    }
+}
+
+// ゲームデータの初期化リセット
+function resetGame() {
+    player.x = 100; player.y = 250; player.vx = 0; player.vy = 0;
+    torpedoes = [];
+    enemies = [];
+    depthCharges = [];
+    score = 0;
+    enemySpawnTimer = 0;
+    defeatedEnemies = 0;
+}
+
+// ゲーム起動
+gameLoop();
+</script>
+</body>
+</html>
